@@ -127,8 +127,39 @@ function runnerMinimumTimeExceeded(runner: RunnerInfo): boolean {
   return launchTimePlusMinimum < now;
 }
 
+async function deleteGitHubRunner(
+  githubInstallationClient: Octokit,
+  ec2runner: RunnerInfo,
+  ghRunnerId: number,
+): Promise<{ ghRunnerId: number; status: number; success: boolean }> {
+  try {
+    let response;
+    if (ec2runner.type === 'Org') {
+      response = await githubInstallationClient.actions.deleteSelfHostedRunnerFromOrg({
+        runner_id: ghRunnerId,
+        org: ec2runner.owner,
+      });
+    } else {
+      const [owner, repo] = ec2runner.owner.split('/');
+      response = await githubInstallationClient.actions.deleteSelfHostedRunnerFromRepo({
+        runner_id: ghRunnerId,
+        owner,
+        repo,
+      });
+    }
+    return { ghRunnerId, status: response.status, success: response.status === 204 };
+  } catch (error) {
+    logger.error(
+      `Failed to de-register GitHub runner ${ghRunnerId} for instance '${ec2runner.instanceId}'. ` +
+        `Error: ${error instanceof Error ? error.message : String(error)}`,
+      { error },
+    );
+    return { ghRunnerId, status: 0, success: false };
+  }
+}
+
 async function removeRunner(ec2runner: RunnerInfo, ghRunnerIds: number[]): Promise<void> {
-  const githubAppClient = await getOrCreateOctokit(ec2runner);
+  const githubInstallationClient = await getOrCreateOctokit(ec2runner);
   try {
     const runnerList = ec2runner as unknown as RunnerList;
     if (runnerList.bypassRemoval) {
@@ -141,33 +172,29 @@ async function removeRunner(ec2runner: RunnerInfo, ghRunnerIds: number[]): Promi
     const states = await Promise.all(
       ghRunnerIds.map(async (ghRunnerId) => {
         // Get busy state instead of using the output of listGitHubRunners(...) to minimize to race condition.
-        return await getGitHubRunnerBusyState(githubAppClient, ec2runner, ghRunnerId);
+        return await getGitHubRunnerBusyState(githubInstallationClient, ec2runner, ghRunnerId);
       }),
     );
 
     if (states.every((busy) => busy === false)) {
-      const statuses = await Promise.all(
-        ghRunnerIds.map(async (ghRunnerId) => {
-          return (
-            ec2runner.type === 'Org'
-              ? await githubAppClient.actions.deleteSelfHostedRunnerFromOrg({
-                  runner_id: ghRunnerId,
-                  org: ec2runner.owner,
-                })
-              : await githubAppClient.actions.deleteSelfHostedRunnerFromRepo({
-                  runner_id: ghRunnerId,
-                  owner: ec2runner.owner.split('/')[0],
-                  repo: ec2runner.owner.split('/')[1],
-                })
-          ).status;
-        }),
+      const results = await Promise.all(
+        ghRunnerIds.map((ghRunnerId) => deleteGitHubRunner(githubInstallationClient, ec2runner, ghRunnerId)),
       );
 
-      if (statuses.every((status) => status == 204)) {
+      const allSucceeded = results.every((r) => r.success);
+      const failedRunners = results.filter((r) => !r.success);
+
+      if (allSucceeded) {
         await terminateRunner(ec2runner.instanceId);
         logger.info(`AWS runner instance '${ec2runner.instanceId}' is terminated and GitHub runner is de-registered.`);
       } else {
-        logger.error(`Failed to de-register GitHub runner: ${statuses}`);
+        // Only terminate EC2 if we successfully de-registered from GitHub
+        // Otherwise, leave the instance running so the next scale-down cycle can retry
+        logger.error(
+          `Failed to de-register ${failedRunners.length} GitHub runner(s) for instance '${ec2runner.instanceId}'. ` +
+            `Instance will NOT be terminated to allow retry on next scale-down cycle. ` +
+            `Failed runner IDs: ${failedRunners.map((r) => r.ghRunnerId).join(', ')}`,
+        );
       }
     } else {
       logger.info(`Runner '${ec2runner.instanceId}' cannot be de-registered, because it is still busy.`);
