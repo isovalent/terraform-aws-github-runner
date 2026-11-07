@@ -19,7 +19,13 @@ export async function dispatch(
 ): Promise<Response> {
   validateRepoInAllowList(event, config);
 
-  return await handleWorkflowJob(event, eventType, config.matcherConfig!, config.queueSelectionStrategy);
+  return await handleWorkflowJob(
+    event,
+    eventType,
+    config.matcherConfig!,
+    config.queueSelectionStrategy,
+    config.matcherConfiguration,
+  );
 }
 
 function validateRepoInAllowList(event: WorkflowJobEvent, config: ConfigDispatcher) {
@@ -34,6 +40,7 @@ async function handleWorkflowJob(
   githubEvent: string,
   matcherConfig: Array<RunnerMatcherConfig>,
   queueSelectionStrategy: QueueSelectionStrategy = 'first',
+  configuration?: ConfigDispatcher['matcherConfiguration'],
 ): Promise<Response> {
   if (body.action !== 'queued') {
     return {
@@ -120,18 +127,38 @@ async function handleWorkflowJob(
   }
 
   await Promise.all(
-    targets.map((queue) =>
-      sendActionRequest({
-        id: body.workflow_job.id,
-        repositoryName: body.repository.name,
-        repositoryOwner: body.repository.owner.login,
-        eventType: githubEvent,
-        installationId: body.installation?.id ?? 0,
-        queueId: queue.id,
-        repoOwnerType: body.repository.owner.type,
-        labels: labelsToSend,
-      }),
-    ),
+    targets.map(async (queue) => {
+      try {
+        await sendActionRequest({
+          id: body.workflow_job.id,
+          repositoryName: body.repository.name,
+          repositoryOwner: body.repository.owner.login,
+          eventType: githubEvent,
+          installationId: body.installation?.id ?? 0,
+          queueId: queue.id,
+          repoOwnerType: body.repository.owner.type,
+          labels: labelsToSend,
+        });
+      } catch (error) {
+        // Keep the original SDK error/code. The invocation's existing error log
+        // receives the operation context without logging the webhook payload.
+        if (error instanceof Error) {
+          Object.assign(error, {
+            runnerOperation: {
+              operation: 'sqs:SendMessage',
+              target_url: queue.id,
+              target_arn: queue.arn,
+              repository: body.repository.full_name,
+              job_id: body.workflow_job.id,
+              run_id: body.workflow_job.run_id,
+              run_attempt: (body.workflow_job as { run_attempt?: number }).run_attempt,
+              configuration,
+            },
+          });
+        }
+        throw error;
+      }
+    }),
   );
 
   const queueIds = targets.map((q) => q.id).join(', ');

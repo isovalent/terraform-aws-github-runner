@@ -26,7 +26,10 @@ export async function directWebhook(event: APIGatewayEvent, context: Context): P
     const config: ConfigWebhook = await ConfigWebhook.load();
     result = await publishForRunners(headersToLowerCase(event.headers), event.body as string, config);
   } catch (e) {
-    logger.error(`Failed to handle webhook event`, { error: e });
+    logger.error(`Failed to handle webhook event`, {
+      error: e,
+      operation_context: e instanceof Error && 'runnerOperation' in e ? e.runnerOperation : undefined,
+    });
     if (e instanceof ValidationError) {
       result = {
         statusCode: e.statusCode,
@@ -51,7 +54,10 @@ export async function eventBridgeWebhook(event: APIGatewayEvent, context: Contex
     const config: ConfigWebhookEventBridge = await ConfigWebhookEventBridge.load();
     result = await publishOnEventBridge(headersToLowerCase(event.headers), event.body as string, config);
   } catch (e) {
-    logger.error(`Failed to handle webhook event`, { error: e });
+    logger.error(`Failed to handle webhook event`, {
+      error: e,
+      operation_context: e instanceof Error && 'runnerOperation' in e ? e.runnerOperation : undefined,
+    });
     if (e instanceof ValidationError) {
       result = {
         statusCode: e.statusCode,
@@ -81,7 +87,10 @@ export async function dispatchToRunners(event: EventWrapper<WorkflowJobEvent>, c
     const config: ConfigDispatcher = await ConfigDispatcher.load();
     await dispatch(event.detail, eventType, config);
   } catch (e) {
-    logger.error(`Failed to handle webhook event`, { error: e });
+    logger.error(`Failed to handle webhook event`, {
+      error: e,
+      operation_context: e instanceof Error && 'runnerOperation' in e ? e.runnerOperation : undefined,
+    });
     throw e;
   }
 }

@@ -1,6 +1,7 @@
 import { getParameter, getParameters } from '@aws-github-runner/aws-ssm-util';
 import { RunnerMatcherConfig } from './sqs';
 import { logger } from '@aws-github-runner/aws-powertools-util';
+import { createHash } from 'node:crypto';
 
 /**
  * Base class for loading configuration from environment variables and SSM parameters.
@@ -54,15 +55,17 @@ abstract class BaseConfig {
     }
   }
 
-  protected async loadParameter(paramPath: string, propertyName: keyof this): Promise<void> {
+  protected async loadParameter(paramPath: string, propertyName: keyof this): Promise<string | undefined> {
     logger.debug(`Loading parameter for ${String(propertyName)} from path ${paramPath}`);
-    await getParameter(paramPath)
+    return await getParameter(paramPath)
       .then((value) => {
         this.loadProperty(propertyName, value);
+        return value;
       })
       .catch((error) => {
         const errorMessage = `Failed to load parameter for ${String(propertyName)} from path ${paramPath}: ${(error as Error).message}`;
         this.configLoadingErrors.push(errorMessage);
+        return undefined;
       });
   }
 
@@ -91,6 +94,11 @@ export type QueueSelectionStrategy = 'first' | 'random' | 'all';
 
 abstract class MatcherAwareConfig extends BaseConfig {
   matcherConfig: RunnerMatcherConfig[] = [];
+  matcherConfiguration?: {
+    sha256: string;
+    loaded_at: string;
+    parameters: Array<{ name: string; version?: number }>;
+  };
   // How to pick a queue when several runner configs match a job equally well.
   // 'first' keeps the historical deterministic behaviour; 'random' spreads jobs
   // across the matching queues to avoid concentrating load on a single one.
@@ -99,7 +107,8 @@ abstract class MatcherAwareConfig extends BaseConfig {
   protected async loadMatcherConfig(paramPathsEnv: string) {
     if (!paramPathsEnv || paramPathsEnv === 'undefined' || paramPathsEnv === 'null' || !paramPathsEnv.includes(':')) {
       // Single path or invalid string → load directly
-      await this.loadParameter(paramPathsEnv, 'matcherConfig');
+      const value = await this.loadParameter(paramPathsEnv, 'matcherConfig');
+      if (value) this.observeMatcher(value, [{ name: paramPathsEnv }]);
       return;
     }
 
@@ -110,7 +119,8 @@ abstract class MatcherAwareConfig extends BaseConfig {
 
     // Batch fetch all matcher config paths in a single SSM API call
     try {
-      const params = await getParameters(paths);
+      const versions: Array<{ name: string; version?: number }> = [];
+      const params = await getParameters(paths, (parameter) => versions.push(parameter));
       let combinedString = '';
       for (const path of paths) {
         const value = params.get(path);
@@ -125,10 +135,20 @@ abstract class MatcherAwareConfig extends BaseConfig {
 
       if (combinedString) {
         this.matcherConfig = JSON.parse(combinedString);
+        this.observeMatcher(combinedString, versions);
       }
     } catch (error) {
       this.configLoadingErrors.push(`Failed to load/parse combined matcher config: ${(error as Error).message}`);
     }
+  }
+
+  private observeMatcher(value: string, parameters: Array<{ name: string; version?: number }>) {
+    this.matcherConfiguration = {
+      sha256: createHash('sha256').update(value).digest('hex'),
+      loaded_at: new Date().toISOString(),
+      parameters,
+    };
+    logger.info('Runner matcher configuration loaded', { configuration: this.matcherConfiguration });
   }
 }
 

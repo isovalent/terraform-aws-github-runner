@@ -24,6 +24,17 @@ beforeEach(() => {
 });
 
 describe('Test getParameter and putParameter', () => {
+  it('exposes parameter names and actual versions without exposing values to the metadata observer', async () => {
+    mockSSMClient
+      .on(GetParametersCommand)
+      .resolves({ Parameters: [{ Name: '/matcher', Version: 42, Value: 'private' }] });
+    const observe = vi.fn();
+    const values = await getParameters(['/matcher'], observe);
+    expect(values.get('/matcher')).toBe('private');
+    expect(observe).toHaveBeenCalledWith({ name: '/matcher', version: 42 });
+    expect(JSON.stringify(observe.mock.calls)).not.toContain('private');
+  });
+
   it('Gets parameters and returns string', async () => {
     // Arrange
     const parameterValue = 'test';

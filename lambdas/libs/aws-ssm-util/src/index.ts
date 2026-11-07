@@ -43,7 +43,10 @@ export async function getParameter(parameter_name: string): Promise<string> {
  *   such as network errors, AWS service errors (e.g., access denied, throttling),
  *   or configuration issues (e.g., missing region or credentials).
  */
-export async function getParameters(parameter_names: string[]): Promise<Map<string, string>> {
+export async function getParameters(
+  parameter_names: string[],
+  observe?: (parameter: { name: string; version?: number }) => void,
+): Promise<Map<string, string>> {
   if (parameter_names.length === 0) {
     return new Map();
   }
@@ -65,6 +68,7 @@ export async function getParameters(parameter_names: string[]): Promise<Map<stri
     for (const param of response.Parameters ?? []) {
       if (param.Name && param.Value) {
         result.set(param.Name, param.Value);
+        observe?.({ name: param.Name, version: param.Version });
       }
     }
   }

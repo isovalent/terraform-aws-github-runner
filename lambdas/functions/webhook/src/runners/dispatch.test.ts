@@ -42,6 +42,29 @@ describe('Dispatcher', () => {
   });
 
   describe('handle work flow job events ', () => {
+    it('preserves the original SDK error and exact failed operation without the event payload', async () => {
+      const error = Object.assign(new Error('The specified queue does not exist.'), { name: 'QueueDoesNotExist' });
+      vi.mocked(sendActionRequest).mockRejectedValueOnce(error);
+      const event = workFlowJobEvent as unknown as WorkflowJobEvent;
+      await expect(dispatch(event, 'workflow_job', config)).rejects.toBe(error);
+      const observed = error as typeof error & {
+        runnerOperation: {
+          target_url: string;
+          target_arn: string;
+          operation: string;
+          job_id: number;
+          configuration: { sha256: string };
+        };
+      };
+      const selected = config.matcherConfig.find((queue) => queue.id === observed.runnerOperation.target_url);
+      expect(observed.runnerOperation.operation).toBe('sqs:SendMessage');
+      expect(observed.runnerOperation.target_arn).toBe(selected?.arn);
+      expect(observed.runnerOperation.job_id).toBe(event.workflow_job.id);
+      expect(observed.runnerOperation.configuration.sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(observed.runnerOperation).not.toHaveProperty('payload');
+      expect(observed.runnerOperation).not.toHaveProperty('webhookSecret');
+    });
+
     it('should not handle "workflow_job" events with actions other than queued (action = started)', async () => {
       const event = { ...workFlowJobEvent, action: 'started' } as unknown as WorkflowJobEvent;
       const resp = await dispatch(event, 'workflow_job', config);

@@ -22,6 +22,34 @@ describe('ConfigLoader Tests', () => {
   });
 
   describe('Check base object', () => {
+    it('records the actual fetched matcher versions and content fingerprint once per load', async () => {
+      process.env.PARAMETER_RUNNER_MATCHER_CONFIG_PATH = '/matcher-0:/matcher-1';
+      const value = JSON.stringify([
+        {
+          id: 'queue',
+          arn: 'arn:aws:sqs:us-east-1:123456789012:queue',
+          matcherConfig: { labelMatchers: [['pool']], exactMatch: false },
+        },
+      ]);
+      vi.mocked(getParameters).mockImplementation(async (names, observe) => {
+        observe?.({ name: names[0], version: 7 });
+        observe?.({ name: names[1], version: 42 });
+        return new Map([
+          [names[0], value.slice(0, 10)],
+          [names[1], value.slice(10)],
+        ]);
+      });
+      const loaded = await ConfigDispatcher.load();
+      expect(loaded.matcherConfiguration?.parameters).toEqual([
+        { name: '/matcher-0', version: 7 },
+        { name: '/matcher-1', version: 42 },
+      ]);
+      expect(loaded.matcherConfiguration?.sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(await ConfigDispatcher.load()).toBe(loaded);
+      expect(getParameters).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(loaded.matcherConfiguration)).not.toContain('labelMatchers');
+    });
+
     function setupConfiguration(): void {
       process.env.EVENT_BUS_NAME = 'event-bus';
       process.env.PARAMETER_RUNNER_MATCHER_CONFIG_PATH = '/path/to/matcher/config';
